@@ -30,6 +30,9 @@
  *
  *****************************/
 
+/** @brief Number of MLFQ priority queues (queue PRIORITY_QUEUES-1 is the highest). */
+#define PRIORITY_QUEUES 10
+
 /** @brief Thread state. 
 
   A value of this type, together with a @c Thread_phase value, completely
@@ -100,6 +103,8 @@ enum SCHED_CAUSE {
 typedef struct thread_control_block {
 
 	PCB* owner_pcb; /**< @brief This is null for a free TCB */
+	PTCB* ptcb; /**< @brief The PTCB of this thread (NULL for idle threads) */
+	int priority; /**< @brief MLFQ queue index; PRIORITY_QUEUES-1 is the highest */
 
 	cpu_context_t context; /**< @brief The thread context */
 	Thread_type type; /**< @brief The type of thread */

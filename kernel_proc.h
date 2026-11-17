@@ -60,7 +60,34 @@ typedef struct process_control_block {
 
   FCB* FIDT[MAX_FILEID];  /**< @brief The fileid table of the process */
 
+  rlnode ptcb_list;       /**< @brief List of the PTCBs of this process's threads */
+  int thread_count;       /**< @brief Number of live (non-exited) threads */
+
 } PCB;
+
+/**
+  @brief Process-Thread Control Block.
+
+  Per-thread information at the process level. The typedef @c PTCB
+  is declared in util.h.
+ */
+struct process_thread_control_block {
+  TCB* tcb;               /**< @brief The thread's TCB */
+
+  Task task;              /**< @brief The thread's start function */
+  int argl;               /**< @brief Length of the argument buffer */
+  void* args;             /**< @brief The argument buffer */
+
+  int exitval;            /**< @brief The thread's exit value */
+
+  int exited;             /**< @brief 1 if the thread has exited */
+  int detached;           /**< @brief 1 if the thread is detached */
+  CondVar exit_cv;        /**< @brief Broadcast when the thread exits or is detached */
+
+  int refcount;           /**< @brief Number of threads waiting in ThreadJoin */
+
+  rlnode ptcb_list_node;  /**< @brief Intrusive node for @c PCB.ptcb_list */
+};
 
 
 /**
