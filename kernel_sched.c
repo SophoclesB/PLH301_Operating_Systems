@@ -171,6 +171,10 @@ TCB* spawn_thread(PCB* pcb, void (*func)())
 	tcb->last_cause = SCHED_IDLE;
 	tcb->curr_cause = SCHED_IDLE;
 
+	/* No PTCB yet (set by the caller); new threads start at the highest priority */
+	tcb->ptcb = NULL;
+	tcb->priority = PRIORITY_QUEUES - 1;
+
 	/* Compute the stack segment address and size */
 	void* sp = ((void*)tcb) + THREAD_TCB_SIZE;
 
@@ -546,6 +550,10 @@ void run_scheduler()
 
 	curcore->idle_thread.curr_cause = SCHED_IDLE;
 	curcore->idle_thread.last_cause = SCHED_IDLE;
+
+	/* The idle thread has no PTCB and is never placed in the MLFQ queues */
+	curcore->idle_thread.ptcb = NULL;
+	curcore->idle_thread.priority = 0;
 
 	/* Initialize interrupt handler */
 	cpu_interrupt_handler(ALARM, yield_handler);
