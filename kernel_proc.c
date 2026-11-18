@@ -221,7 +221,14 @@ Pid_t sys_Exec(Task call, int argl, void* args)
   else
     newproc->args=NULL;
 
-  /* 
+  /* Αρχική τιμή του κωδικού εξόδου. Χρειάζεται γιατί μια διεργασία μπορεί να
+     τελειώσει χωρίς κανένα thread της να καλέσει Exit (όλα καλούν ThreadExit):
+     τότε κανείς δεν γράφει το exitval. Επειδή τα PCB ξαναχρησιμοποιούνται
+     (το initialize_PCB τρέχει μόνο στην εκκίνηση), χωρίς αυτή τη γραμμή ο parent
+     θα έπαιρνε στο WaitChild το exitval της ΠΡΟΗΓΟΥΜΕΝΗΣ διεργασίας του ίδιου PCB. */
+  newproc->exitval = 0;
+
+  /*
     Create and wake up the thread for the main function. This must be the last thing
     we do, because once we wakeup the new thread it may run! so we need to have finished
     the initialization of the PCB.
@@ -336,73 +343,101 @@ Pid_t sys_WaitChild(Pid_t cpid, int* status)
 }
 
 
-void sys_Exit(int exitval)
+/*
+  Καθαρισμός της διεργασίας pcb. Βλ. την τεκμηρίωση στο kernel_proc.h.
+
+  Είναι ο κώδικας που παλιά βρισκόταν στο sys_Exit, μεταφερμένος αυτούσιος.
+  Καλείται ΜΟΝΟ από το τελευταίο thread της διεργασίας (thread_count==0),
+  μέσα από το sys_ThreadExit. ΔΕΝ κοιμίζει το thread: το kernel_sleep(EXITED)
+  το κάνει ο caller, αφού επιστρέψει αυτή η συνάρτηση.
+
+  Must be called with kernel_mutex held
+*/
+void cleanup_process(PCB* pcb)
 {
-
-  PCB *curproc = CURPROC;  /* cache for efficiency */
-
-  /* First, store the exit status */
-  curproc->exitval = exitval;
-
-  /* 
-    Here, we must check that we are not the init task. 
-    If we are, we must wait until all child processes exit. 
+  /*
+    Αν είμαστε το init (pid 1), πρέπει να περιμένουμε να τελειώσουν
+    όλα τα παιδιά μας πριν τερματίσουμε.
+    Προσοχή: το sys_WaitChild μπορεί να κοιμηθεί (kernel_wait), οπότε
+    προσωρινά αφήνει το kernel_mutex. Δεν πειράζει, γιατί κανένα άλλο
+    thread της διεργασίας δεν είναι ζωντανό (thread_count==0).
    */
-  if(get_pid(curproc)==1) {
+  if(get_pid(pcb)==1) {
 
     while(sys_WaitChild(NOPROC,NULL)!=NOPROC);
 
   } else {
 
-    /* Reparent any children of the exiting process to the 
-       initial task */
+    /* Τα παιδιά της διεργασίας που τερματίζει υιοθετούνται από το init */
     PCB* initpcb = get_pcb(1);
-    while(!is_rlist_empty(& curproc->children_list)) {
-      rlnode* child = rlist_pop_front(& curproc->children_list);
+    while(!is_rlist_empty(& pcb->children_list)) {
+      rlnode* child = rlist_pop_front(& pcb->children_list);
       child->pcb->parent = initpcb;
       rlist_push_front(& initpcb->children_list, child);
     }
 
-    /* Add exited children to the initial task's exited list 
-       and signal the initial task */
-    if(!is_rlist_empty(& curproc->exited_list)) {
-      rlist_append(& initpcb->exited_list, &curproc->exited_list);
+    /* Τα παιδιά που έχουν ήδη τερματίσει (zombies) πάνε στη λίστα
+       exited του init, και το ξυπνάμε για να τα μαζέψει */
+    if(!is_rlist_empty(& pcb->exited_list)) {
+      rlist_append(& initpcb->exited_list, &pcb->exited_list);
       kernel_broadcast(& initpcb->child_exit);
     }
 
-    /* Put me into my parent's exited list */
-    rlist_push_front(& curproc->parent->exited_list, &curproc->exited_node);
-    kernel_broadcast(& curproc->parent->child_exit);
+    /* Μπαίνουμε στη λίστα exited του parent και τον ξυπνάμε (WaitChild) */
+    rlist_push_front(& pcb->parent->exited_list, &pcb->exited_node);
+    kernel_broadcast(& pcb->parent->child_exit);
 
   }
 
-  assert(is_rlist_empty(& curproc->children_list));
-  assert(is_rlist_empty(& curproc->exited_list));
+  assert(is_rlist_empty(& pcb->children_list));
+  assert(is_rlist_empty(& pcb->exited_list));
 
 
-  /* 
-    Do all the other cleanup we want here, close files etc. 
+  /*
+    Υπόλοιπος καθαρισμός: ορίσματα, αρχεία κλπ.
    */
 
-  /* Release the args data */
-  if(curproc->args) {
-    free(curproc->args);
-    curproc->args = NULL;
+  /* Αποδέσμευση του αντιγράφου των args (το έφτιαξε το sys_Exec).
+     Το PTCB του main thread δείχνει κι αυτό εδώ, αλλά δεν το διαβάζει
+     πια κανείς: η διεργασία δεν έχει ζωντανά threads. */
+  if(pcb->args) {
+    free(pcb->args);
+    pcb->args = NULL;
   }
 
-  /* Clean up FIDT */
+  /* Κλείσιμο των αρχείων της διεργασίας (FIDT) */
   for(int i=0;i<MAX_FILEID;i++) {
-    if(curproc->FIDT[i] != NULL) {
-      FCB_decref(curproc->FIDT[i]);
-      curproc->FIDT[i] = NULL;
+    if(pcb->FIDT[i] != NULL) {
+      FCB_decref(pcb->FIDT[i]);
+      pcb->FIDT[i] = NULL;
     }
   }
 
-  /* Now, mark the process as exited. */
-  curproc->pstate = ZOMBIE;
+  /* Η διεργασία γίνεται zombie: το PCB μένει μέχρι να το μαζέψει
+     ο parent με WaitChild (cleanup_zombie -> release_PCB). Ο parent
+     δεν μπορεί να το κάνει πριν αφήσουμε το kernel_mutex, δηλαδή
+     πριν το kernel_sleep(EXITED) του caller. */
+  pcb->pstate = ZOMBIE;
+}
 
-  /* Bye-bye cruel world */
-  kernel_sleep(EXITED, SCHED_USER);
+
+/*
+  Exit: τερματισμός της διεργασίας με κωδικό exitval.
+
+  Γράφει τον κωδικό εξόδου της ΔΙΕΡΓΑΣΙΑΣ και μετά τερματίζει το τρέχον
+  thread όπως το ThreadExit. Η διεργασία τελειώνει πραγματικά όταν βγει
+  και το τελευταίο της thread (αυτό κάνει το cleanup_process).
+  Αν πολλά threads καλέσουν Exit, μετράει η τιμή του τελευταίου.
+*/
+void sys_Exit(int exitval)
+{
+  /* Κωδικός εξόδου της διεργασίας (τον διαβάζει ο parent στο WaitChild) */
+  CURPROC->exitval = exitval;
+
+  /* ΠΡΟΣΟΧΗ: sys_ThreadExit και ΟΧΙ ThreadExit. Το ThreadExit είναι το
+     wrapper του system call που ξανακλειδώνει το kernel_mutex, το οποίο
+     ήδη κρατάμε: θα είχαμε deadlock. Το sys_ThreadExit δεν επιστρέφει. */
+  sys_ThreadExit(exitval);
 }
 
 
