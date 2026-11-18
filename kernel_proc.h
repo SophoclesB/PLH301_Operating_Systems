@@ -41,7 +41,6 @@ typedef struct process_control_block {
   PCB* parent;            /**< @brief Parent's pcb. */
   int exitval;            /**< @brief The exit value of the process */
 
-  TCB* main_thread;       /**< @brief The main thread */
   Task main_task;         /**< @brief The main thread's function */
   int argl;               /**< @brief The main thread's argument length */
   void* args;             /**< @brief The main thread's argument string */
@@ -76,7 +75,11 @@ struct process_thread_control_block {
 
   Task task;              /**< @brief The thread's start function */
   int argl;               /**< @brief Length of the argument buffer */
-  void* args;             /**< @brief The argument buffer */
+  void* args;             /**< @brief The argument buffer.
+                               ΠΡΟΣΟΧΗ: το PTCB ΔΕΝ είναι ιδιοκτήτης αυτής της μνήμης.
+                               Για το main thread δείχνει στο pcb->args (το ελευθερώνει
+                               η διεργασία), για τα υπόλοιπα threads στον buffer του χρήστη.
+                               Ποτέ free(ptcb->args). */
 
   int exitval;            /**< @brief The thread's exit value */
 
@@ -121,6 +124,27 @@ PCB* get_pcb(Pid_t pid);
   @returns the PID of the process, or NOPROC.
 */
 Pid_t get_pid(PCB* pcb);
+
+/**
+  @brief Δημιουργία νέου thread μαζί με το PTCB του.
+
+  Δεσμεύει και αρχικοποιεί ένα PTCB, δημιουργεί το TCB με @c spawn_thread,
+  συνδέει τα δύο μεταξύ τους, προσθέτει το PTCB στο @c pcb->ptcb_list και
+  αυξάνει το @c pcb->thread_count.
+
+  ΔΕΝ ξυπνά το thread: ο caller πρέπει να καλέσει @c wakeup(ptcb->tcb)
+  αφού ολοκληρώσει όλη την αρχικοποίηση.
+
+  Καλείται με κλειδωμένο το kernel_mutex.
+
+  @param pcb   η διεργασία στην οποία ανήκει το νέο thread
+  @param task  η συνάρτηση χρήστη που θα εκτελέσει το thread
+  @param argl  το μήκος των ορισμάτων
+  @param args  τα ορίσματα (δεν αντιγράφονται, βλ. PTCB.args)
+  @param func  η συνάρτηση εκκίνησης του kernel (π.χ. @c start_main_thread)
+  @returns το νέο PTCB (ποτέ NULL: αν αποτύχει η malloc, FATAL)
+*/
+PTCB* spawn_ptcb(PCB* pcb, Task task, int argl, void* args, void (*func)());
 
 /** @} */
 
