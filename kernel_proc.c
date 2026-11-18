@@ -129,6 +129,52 @@ void start_main_thread()
 
 
 /*
+  Δημιουργεί ένα thread της διεργασίας pcb μαζί με το PTCB του.
+  Βλ. την τεκμηρίωση στο kernel_proc.h.
+
+  Must be called with kernel_mutex held
+*/
+PTCB* spawn_ptcb(PCB* pcb, Task task, int argl, void* args, void (*func)())
+{
+  /* Η malloc ΔΕΝ μηδενίζει τη μνήμη: κάθε πεδίο πρέπει να αρχικοποιηθεί
+     ρητά παρακάτω, αλλιώς θα περιέχει "σκουπίδια". */
+  PTCB* ptcb = (PTCB*) malloc(sizeof(PTCB));
+  if(ptcb == NULL)
+    FATAL("spawn_ptcb: out of memory for PTCB");
+
+  /* Τι θα εκτελέσει το thread. Τα args ΔΕΝ αντιγράφονται και ΔΕΝ ανήκουν
+     στο PTCB (για το main thread ανήκουν στο PCB), άρα ποτέ free(ptcb->args). */
+  ptcb->task = task;
+  ptcb->argl = argl;
+  ptcb->args = args;
+
+  /* Κατάσταση τερματισμού / join / detach */
+  ptcb->exitval = 0;
+  ptcb->exited = 0;
+  ptcb->detached = 0;
+  ptcb->exit_cv = COND_INIT;
+  ptcb->refcount = 0;
+
+  /* Ο κόμβος της λίστας δείχνει πίσω στο ίδιο το PTCB (node->ptcb) */
+  rlnode_init(& ptcb->ptcb_list_node, ptcb);
+
+  /* Δημιουργία του TCB (σε κατάσταση INIT, δεν τρέχει ακόμα)
+     και αμφίδρομη σύνδεση TCB <-> PTCB */
+  TCB* tcb = spawn_thread(pcb, func);
+  ptcb->tcb = tcb;
+  tcb->ptcb = ptcb;
+
+  /* Καταχώριση στη διεργασία */
+  rlist_push_back(& pcb->ptcb_list, & ptcb->ptcb_list_node);
+  pcb->thread_count++;
+
+  /* ΔΕΝ κάνουμε wakeup εδώ: το κάνει ο caller όταν όλα είναι έτοιμα,
+     γιατί μόλις ξυπνήσει το thread μπορεί να τρέξει αμέσως σε άλλο core. */
+  return ptcb;
+}
+
+
+/*
 	System call to create a new process.
  */
 Pid_t sys_Exec(Task call, int argl, void* args)
@@ -181,8 +227,10 @@ Pid_t sys_Exec(Task call, int argl, void* args)
     the initialization of the PCB.
    */
   if(call != NULL) {
-    newproc->main_thread = spawn_thread(newproc, start_main_thread);
-    wakeup(newproc->main_thread);
+    /* Το main thread αποκτά κι αυτό PTCB. Τα args δείχνουν στο αντίγραφο
+       που ανήκει στη διεργασία (newproc->args), όχι σε νέο αντίγραφο. */
+    PTCB* ptcb = spawn_ptcb(newproc, call, newproc->argl, newproc->args, start_main_thread);
+    wakeup(ptcb->tcb);
   }
 
 
@@ -349,9 +397,6 @@ void sys_Exit(int exitval)
       curproc->FIDT[i] = NULL;
     }
   }
-
-  /* Disconnect my main_thread */
-  curproc->main_thread = NULL;
 
   /* Now, mark the process as exited. */
   curproc->pstate = ZOMBIE;
