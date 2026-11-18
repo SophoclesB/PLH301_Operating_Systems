@@ -146,6 +146,22 @@ Pid_t get_pid(PCB* pcb);
 */
 PTCB* spawn_ptcb(PCB* pcb, Task task, int argl, void* args, void (*func)());
 
+/**
+  @brief Καθαρισμός μιας διεργασίας όταν τερματίσει το τελευταίο της thread.
+
+  Αν η διεργασία είναι το init (pid 1), περιμένει να τελειώσουν όλα τα παιδιά της.
+  Αλλιώς δίνει τα παιδιά της στο init και μπαίνει στη λίστα exited του parent.
+  Μετά ελευθερώνει τα args, κλείνει τα αρχεία του FIDT και κάνει τη διεργασία ZOMBIE.
+
+  ΔΕΝ κοιμίζει το τρέχον thread: ο caller (sys_ThreadExit) καλεί μετά
+  @c kernel_sleep(EXITED, SCHED_USER).
+
+  Καλείται με κλειδωμένο το kernel_mutex, μόνο όταν @c pcb->thread_count==0.
+
+  @param pcb η διεργασία που τερματίζει
+*/
+void cleanup_process(PCB* pcb);
+
 /** @} */
 
 #endif
