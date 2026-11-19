@@ -85,6 +85,12 @@ PCB* acquire_PCB()
 
   if(pcb_freelist != NULL) {
     pcb = pcb_freelist;
+
+    /* Τα PCB ξαναχρησιμοποιούνται. Το cleanup_process της προηγούμενης
+       διεργασίας πρέπει να άφησε το PCB χωρίς PTCB και χωρίς threads. */
+    assert(is_rlist_empty(& pcb->ptcb_list));
+    assert(pcb->thread_count == 0);
+
     pcb->pstate = ALIVE;
     pcb_freelist = pcb_freelist->parent;
     process_count++;
@@ -171,6 +177,26 @@ PTCB* spawn_ptcb(PCB* pcb, Task task, int argl, void* args, void (*func)())
   /* ΔΕΝ κάνουμε wakeup εδώ: το κάνει ο caller όταν όλα είναι έτοιμα,
      γιατί μόλις ξυπνήσει το thread μπορεί να τρέξει αμέσως σε άλλο core. */
   return ptcb;
+}
+
+
+/*
+  Αποδέσμευση PTCB. Βλ. την τεκμηρίωση στο kernel_proc.h.
+
+  Must be called with kernel_mutex held
+*/
+void release_PTCB(PTCB* ptcb)
+{
+  /* Προϋποθέσεις (βλ. kernel_proc.h): το thread έχει τερματίσει και κανείς
+     δεν βρίσκεται μέσα σε Join γι' αυτό. Αλλιώς κάποιος θα διάβαζε το PTCB
+     (ή το exit_cv του) μετά το free: use-after-free. */
+  assert(ptcb->exited == 1);
+  assert(ptcb->refcount == 0);
+
+  /* ΠΡΩΤΑ βγαίνει από τη λίστα, ΜΕΤΑ free. Με την αντίστροφη σειρά, το
+     rlist_remove θα έγραφε σε ελευθερωμένη μνήμη (undefined behavior). */
+  rlist_remove(& ptcb->ptcb_list_node);
+  free(ptcb);
 }
 
 
@@ -412,6 +438,27 @@ void cleanup_process(PCB* pcb)
       pcb->FIDT[i] = NULL;
     }
   }
+
+  /* Αποδέσμευση όσων PTCB έμειναν στη λίστα: όσα δεν έγιναν ποτέ Join,
+     και (αν δεν είναι detached) αυτό του τρέχοντος thread.
+     Όσα ελευθερώθηκαν νωρίτερα (από joiner ή από detached thread στο
+     sys_ThreadExit) έχουν ήδη βγει από τη λίστα, άρα δεν τα ξαναβλέπουμε
+     εδώ: έτσι δεν γίνεται double free.
+     Το μπλοκ είναι στο τέλος, αφού το init έχει ήδη τελειώσει την αναμονή
+     στο sys_WaitChild παραπάνω. */
+  while(!is_rlist_empty(& pcb->ptcb_list)) {
+    PTCB* ptcb = pcb->ptcb_list.next->ptcb;
+
+    /* Όποιος περιμένει σε Join είναι ζωντανό thread αυτής της διεργασίας.
+       Αφού thread_count==0, δεν περιμένει κανείς. */
+    assert(ptcb->refcount == 0);
+
+    release_PTCB(ptcb);
+  }
+
+  /* Το thread_count είναι ήδη 0 (γι' αυτό καλεστήκαμε). Δεν το μηδενίζουμε
+     εδώ: μια ανάθεση θα έκρυβε ένα bug, ενώ το assert θα το εντοπίσει. */
+  assert(pcb->thread_count == 0);
 
   /* Η διεργασία γίνεται zombie: το PCB μένει μέχρι να το μαζέψει
      ο parent με WaitChild (cleanup_zombie -> release_PCB). Ο parent

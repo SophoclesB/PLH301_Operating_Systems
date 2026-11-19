@@ -101,10 +101,10 @@ int sys_ThreadJoin(Tid_t tid, int* exitval)
 	if(ptcb->detached)
 		return -1;
 
-	/* Αναμονή. Το refcount μετρά πόσοι περιμένουν σε Join γι' αυτό το thread
-	   (θα το χρειαστεί το free του Ticket 5). Ξυπνάμε από το broadcast του
-	   ThreadExit ή του ThreadDetach. Το kernel_wait αφήνει το kernel_mutex όσο
-	   κοιμόμαστε και το ξαναπαίρνει πριν επιστρέψει. Ο while (και όχι if)
+	/* Αναμονή. Το refcount μετρά πόσοι βρίσκονται μέσα σε Join γι' αυτό το
+	   thread: όσο είναι > 0, το PTCB ΔΕΝ ελευθερώνεται. Ξυπνάμε από το broadcast
+	   του ThreadExit ή του ThreadDetach. Το kernel_wait αφήνει το kernel_mutex
+	   όσο κοιμόμαστε και το ξαναπαίρνει πριν επιστρέψει. Ο while (και όχι if)
 	   ξαναελέγχει τη συνθήκη μετά από κάθε ξύπνημα. */
 	ptcb->refcount++;
 	while(!ptcb->exited && !ptcb->detached)
@@ -121,11 +121,30 @@ int sys_ThreadJoin(Tid_t tid, int* exitval)
 		ret = 0;
 	}
 
-	/* Διαβάσαμε ό,τι χρειαζόμασταν από το PTCB ΠΡΙΝ το refcount--. Στο Ticket 5,
-	   αμέσως μετά το refcount--, αν exited && refcount==0, ο joiner θα ελευθερώνει
-	   το PTCB (rlist_remove + free). Μετά από αυτό κανένα deref του ptcb. */
+	/* ΓΙΑΤΙ το refcount-- είναι ΜΕΤΑ το kernel_wait (και πρέπει να μείνει εκεί):
+	   1. Πρέπει πρώτα να έχουμε διαβάσει ό,τι χρειαζόμαστε από το PTCB
+	      (detached, exitval) παραπάνω.
+	   2. Το ίδιο το exit_cv βρίσκεται ΜΕΣΑ στο PTCB. Μετά το ξύπνημα, ο κώδικας
+	      του cv_wait (kernel_cc.c) κλειδώνει το cv->waitset_lock, δηλαδή γράφει
+	      στη μνήμη του PTCB, ΠΡΙΝ ξαναπάρουμε το kernel_mutex. Όσο το refcount
+	      μας μετράει, κανείς δεν μπορεί να ελευθερώσει το PTCB, άρα το
+	      exit_cv είναι έγκυρο. Αν το refcount-- γινόταν πριν από το
+	      kernel_wait, ο ThreadExit (detached && refcount==0) ή κάποιος άλλος
+	      joiner θα μπορούσε να κάνει free ενώ εμείς είμαστε ακόμα μέσα στο
+	      cv_wait: use-after-free. */
 	ptcb->refcount--;
 
+	/* Ο τελευταίος που "κρατά" ένα τερματισμένο thread το ελευθερώνει.
+	   Ισχύει ΚΑΙ όταν ret==-1: αν το thread έγινε detached όσο περιμέναμε και
+	   μετά τερμάτισε, ο ThreadExit του δεν το ελευθέρωσε (το refcount ήταν > 0
+	   τότε), άρα αν δεν το κάνουμε εμείς θα έχουμε leak.
+	   Αν !exited, δεν το αγγίζουμε: θα το ελευθερώσει ο ThreadExit (αν είναι
+	   detached), ένας μελλοντικός joiner ή το cleanup_process. */
+	if(ptcb->exited && ptcb->refcount == 0)
+		release_PTCB(ptcb);
+
+	/* Από εδώ και πέρα ΚΑΝΕΝΑ deref του ptcb: μπορεί να έχει ελευθερωθεί.
+	   Ένα επόμενο Join με το ίδιο tid θα αποτύχει στο rlist_find (-1). */
 	return ret;
 }
 
@@ -183,14 +202,33 @@ void sys_ThreadExit(int exitval)
 	/* Ένα ζωντανό thread λιγότερο στη διεργασία */
 	curproc->thread_count--;
 
-	/* Αν ήμασταν το τελευταίο thread, καθαρίζουμε τη διεργασία */
+	/* (α) Αν είμαστε detached, κανείς δεν θα κάνει Join για να ελευθερώσει
+	   το PTCB μας, άρα το ελευθερώνουμε εμείς. Αλλά μόνο αν refcount==0: αν
+	   κάποιος joiner ξύπνησε από το Detach και δεν έχει τρέξει ακόμα, το PTCB
+	   το ελευθερώνει εκείνος (βλ. sys_ThreadJoin).
+	   Αν ΔΕΝ είμαστε detached, το PTCB μένει: μπορεί να έρθει Join αργότερα. */
+	if(ptcb->detached && ptcb->refcount == 0)
+		release_PTCB(ptcb);
+
+	/* Από εδώ και πέρα ΚΑΝΕΝΑ deref του ptcb (μπορεί να έχει ελευθερωθεί).
+	   Μηδενίζουμε και τον δείκτη στο TCB, ώστε να μη μείνει dangling. */
+	ptcb = NULL;
+	cur_thread()->ptcb = NULL;
+
+	/* (β) Αν ήμασταν το τελευταίο thread, καθαρίζουμε τη διεργασία. Το
+	   cleanup_process ελευθερώνει όσα PTCB έμειναν στη λίστα.
+	   ΑΠΟΦΥΓΗ DOUBLE FREE: η σειρά (α) πριν από (β) είναι υποχρεωτική. Αν
+	   είμαστε detached, το (α) μας έβγαλε ήδη από τη λίστα (release_PTCB),
+	   άρα το (β) δεν μας ξαναβλέπει. Αν δεν είμαστε, το (α) δεν έκανε τίποτα
+	   και μας ελευθερώνει μόνο το (β). Με την αντίστροφη σειρά, το
+	   ptcb->detached του (α) θα ήταν ήδη use-after-free. */
 	if(curproc->thread_count == 0)
 		cleanup_process(curproc);
 
-	/* Το PTCB ΔΕΝ ελευθερώνεται εδώ (μπορεί να έρθει Join αργότερα· βλ. Ticket 5).
-	   ΠΡΟΣΟΧΗ: μετά το kernel_sleep(EXITED) ο scheduler ελευθερώνει το TCB
-	   (release_TCB), άρα από εκεί και πέρα το ptcb->tcb είναι dangling pointer
-	   και κανείς δεν πρέπει να το διαβάσει. */
+	/* ΠΡΟΣΟΧΗ: μετά το kernel_sleep(EXITED) ο scheduler ελευθερώνει το TCB
+	   (release_TCB), άρα αν το PTCB μας ζει ακόμα (μη detached, περιμένει
+	   Join), το ptcb->tcb του είναι dangling pointer και κανείς δεν πρέπει
+	   να το διαβάσει. */
 	kernel_sleep(EXITED, SCHED_USER);
 }
 
