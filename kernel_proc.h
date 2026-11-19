@@ -147,11 +147,35 @@ Pid_t get_pid(PCB* pcb);
 PTCB* spawn_ptcb(PCB* pcb, Task task, int argl, void* args, void (*func)());
 
 /**
+  @brief Αποδέσμευση ενός PTCB.
+
+  Βγάζει το PTCB από το @c ptcb_list της διεργασίας του και μετά το
+  ελευθερώνει. Είναι ο ΜΟΝΑΔΙΚΟΣ τρόπος να ελευθερωθεί ένα PTCB, ώστε να
+  ισχύει πάντα το αναλλοίωτο:
+
+      ένα PTCB είναι στο ptcb_list  <=>  δεν έχει ελευθερωθεί.
+
+  Έτσι το @c cleanup_process (που ελευθερώνει ό,τι βρει στη λίστα) δεν
+  μπορεί να κάνει double free, και το @c rlist_find των Join/Detach
+  απορρίπτει όσα tid έχουν ήδη ελευθερωθεί.
+
+  ΔΕΝ ελευθερώνει το @c ptcb->args (δεν ανήκει στο PTCB, βλ. PTCB.args).
+  Μετά την κλήση, ο caller δεν πρέπει να κάνει κανένα deref του @c ptcb.
+
+  Καλείται με κλειδωμένο το kernel_mutex, μόνο όταν
+  @c ptcb->exited==1 και @c ptcb->refcount==0.
+
+  @param ptcb το PTCB που ελευθερώνεται
+*/
+void release_PTCB(PTCB* ptcb);
+
+/**
   @brief Καθαρισμός μιας διεργασίας όταν τερματίσει το τελευταίο της thread.
 
   Αν η διεργασία είναι το init (pid 1), περιμένει να τελειώσουν όλα τα παιδιά της.
   Αλλιώς δίνει τα παιδιά της στο init και μπαίνει στη λίστα exited του parent.
-  Μετά ελευθερώνει τα args, κλείνει τα αρχεία του FIDT και κάνει τη διεργασία ZOMBIE.
+  Μετά ελευθερώνει τα args, κλείνει τα αρχεία του FIDT, ελευθερώνει όσα PTCB
+  έμειναν στο @c ptcb_list (με @c release_PTCB) και κάνει τη διεργασία ZOMBIE.
 
   ΔΕΝ κοιμίζει το τρέχον thread: ο caller (sys_ThreadExit) καλεί μετά
   @c kernel_sleep(EXITED, SCHED_USER).
