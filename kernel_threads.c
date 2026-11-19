@@ -75,18 +75,88 @@ Tid_t sys_ThreadSelf()
 
 /**
   @brief Join the given thread.
+
+  Περιμένει να τερματίσει το thread tid και γράφει το exitval του στο *exitval
+  (αν δεν είναι NULL). Επιστρέφει -1 αν το tid δεν είναι thread αυτής της
+  διεργασίας, αν είναι το τρέχον thread, ή αν το thread είναι (ή γίνει όσο
+  περιμένουμε) detached. Στο *exitval γράφουμε ΜΟΝΟ σε επιτυχία: σε σφάλμα ο
+  δείκτης μπορεί να είναι άκυρος (π.χ. το test join_illegal_tid περνά (int*)-1).
   */
 int sys_ThreadJoin(Tid_t tid, int* exitval)
 {
-	return -1;
+	/* Μόνο cast, ΟΧΙ deref ακόμα: το tid μπορεί να είναι οτιδήποτε */
+	PTCB* ptcb = (PTCB*) tid;
+
+	/* Εγκυρότητα: το rlist_find συγκρίνει μόνο διευθύνσεις, οπότε είναι ασφαλές
+	   και για σκουπίδια (NOTHREAD, τυχαίοι αριθμοί, thread άλλης διεργασίας).
+	   ΠΡΕΠΕΙ να γίνει πριν από οποιοδήποτε deref του ptcb. */
+	if(rlist_find(& CURPROC->ptcb_list, ptcb, NULL) == NULL)
+		return -1;
+
+	/* Join στον εαυτό: θα περιμέναμε για πάντα */
+	if(ptcb == cur_thread()->ptcb)
+		return -1;
+
+	/* Από εδώ και πέρα το deref είναι ασφαλές. Σε detached thread δεν γίνεται Join. */
+	if(ptcb->detached)
+		return -1;
+
+	/* Αναμονή. Το refcount μετρά πόσοι περιμένουν σε Join γι' αυτό το thread
+	   (θα το χρειαστεί το free του Ticket 5). Ξυπνάμε από το broadcast του
+	   ThreadExit ή του ThreadDetach. Το kernel_wait αφήνει το kernel_mutex όσο
+	   κοιμόμαστε και το ξαναπαίρνει πριν επιστρέψει. Ο while (και όχι if)
+	   ξαναελέγχει τη συνθήκη μετά από κάθε ξύπνημα. */
+	ptcb->refcount++;
+	while(!ptcb->exited && !ptcb->detached)
+		kernel_wait(& ptcb->exit_cv, SCHED_USER);
+
+	/* Ένα thread μπορεί να έχει ΚΑΙ detached==1 ΚΑΙ exited==1 (Detach όσο ζούσε
+	   και μετά ThreadExit). Γι' αυτό ελέγχουμε μόνο το detached: αν είναι 1, ο
+	   joiner παίρνει -1 ανεξάρτητα από το exited. Αν είναι exited && !detached,
+	   η κατάσταση δεν αλλάζει πια, γιατί το Detach απορρίπτει όσα έχουν τερματίσει. */
+	int ret = -1;
+	if(!ptcb->detached) {
+		if(exitval != NULL)
+			*exitval = ptcb->exitval;
+		ret = 0;
+	}
+
+	/* Διαβάσαμε ό,τι χρειαζόμασταν από το PTCB ΠΡΙΝ το refcount--. Στο Ticket 5,
+	   αμέσως μετά το refcount--, αν exited && refcount==0, ο joiner θα ελευθερώνει
+	   το PTCB (rlist_remove + free). Μετά από αυτό κανένα deref του ptcb. */
+	ptcb->refcount--;
+
+	return ret;
 }
 
 /**
   @brief Detach the given thread.
+
+  Κάνει το thread tid detached: δεν μπορεί πια να γίνει Join. Επιστρέφει -1 αν
+  το tid δεν είναι thread αυτής της διεργασίας ή αν το thread έχει τερματίσει.
+  Ένα thread μπορεί να κάνει Detach τον εαυτό του.
   */
 int sys_ThreadDetach(Tid_t tid)
 {
-	return -1;
+	/* Μόνο cast, ΟΧΙ deref ακόμα (βλ. sys_ThreadJoin) */
+	PTCB* ptcb = (PTCB*) tid;
+
+	if(rlist_find(& CURPROC->ptcb_list, ptcb, NULL) == NULL)
+		return -1;
+
+	/* Ένα thread που έχει τερματίσει δεν μπορεί να γίνει detached (tinyos.h) */
+	if(ptcb->exited)
+		return -1;
+
+	/* Idempotent: αν ήταν ήδη detached (και ζωντανό), το ξαναγράφουμε 1 και
+	   επιστρέφουμε 0 (βλ. test multiple_detach) */
+	ptcb->detached = 1;
+
+	/* Ξυπνάμε όσους περιμένουν σε Join, ώστε να δουν detached==1 και να
+	   επιστρέψουν -1 */
+	kernel_broadcast(& ptcb->exit_cv);
+
+	return 0;
 }
 
 /**
