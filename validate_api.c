@@ -2667,6 +2667,53 @@ BOOT_TEST(test_mlfq_cpu_bound_drops_to_lowest,
 }
 
 
+/*
+  Boost test (Ticket 8): περισσότερα CPU-bound threads από cores, ώστε
+  κάποια να περιμένουν σε ουρά. Όταν ένα thread φτάσει στο 0, χωρίς I/O
+  η priority του μπορεί να ανέβει μόνο από boost.
+*/
+#define MLFQ_BOOST_SPINNERS 8
+
+struct mlfq_boost_shared {
+	volatile int boosted; /* 1 μόλις κάποιο thread ανέβει από το 0 */
+};
+
+static int mlfq_boost_spin_task(int argl, void* args)
+{
+	struct mlfq_boost_shared* s = args;
+	int reached_bottom = 0;
+
+	/* Έως 5 s, αλλά σταματάμε μόλις δούμε boost σε οποιοδήποτε thread */
+	TimerDuration start = bios_clock();
+	while (!s->boosted && bios_clock() - start < 500 * QUANTUM) {
+		int p = cur_thread()->priority;
+		if (p == 0)
+			reached_bottom = 1;
+		else if (reached_bottom)
+			s->boosted = 1;
+	}
+	return 0;
+}
+
+BOOT_TEST(test_mlfq_boost_lifts_starved_threads,
+	"MLFQ: a periodic boost raises queued threads above priority 0."
+	)
+{
+	struct mlfq_boost_shared s = { .boosted = 0 };
+	Tid_t t[MLFQ_BOOST_SPINNERS];
+
+	for (int i = 0; i < MLFQ_BOOST_SPINNERS; i++) {
+		t[i] = CreateThread(mlfq_boost_spin_task, 0, &s);
+		ASSERT(t[i] != NOTHREAD);
+	}
+	for (int i = 0; i < MLFQ_BOOST_SPINNERS; i++)
+		ASSERT(ThreadJoin(t[i], NULL) == 0);
+
+	ASSERT_MSG(s.boosted, "κανένα thread δεν ανέβηκε από το 0 (δεν έγινε boost)\n");
+	return 0;
+}
+
+
 TEST_SUITE(user_tests,
 	"These are tests defined by the user."
 	)
@@ -2674,6 +2721,7 @@ TEST_SUITE(user_tests,
 	&dummy_user_test,
 	&test_mlfq_new_thread_starts_at_top,
 	&test_mlfq_cpu_bound_drops_to_lowest,
+	&test_mlfq_boost_lifts_starved_threads,
 	NULL
 };
 

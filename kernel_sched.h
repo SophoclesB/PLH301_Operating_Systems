@@ -33,6 +33,11 @@
 /** @brief Number of MLFQ priority queues (queue PRIORITY_QUEUES-1 is the highest). */
 #define PRIORITY_QUEUES 10
 
+/** @brief MLFQ boost: κάθε BOOST_PERIOD κλήσεις του yield (σε όλους τους
+    cores μαζί), όλες οι ουρές ανεβαίνουν ένα επίπεδο, ώστε τα threads
+    χαμηλής προτεραιότητας να μη λιμοκτονούν (starvation). */
+#define BOOST_PERIOD 100
+
 /** @brief Thread state. 
 
   A value of this type, together with a @c Thread_phase value, completely

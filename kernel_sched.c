@@ -446,6 +446,28 @@ static void sched_update_priority(TCB* tcb, enum SCHED_CAUSE cause)
 	}
 }
 
+/*
+  MLFQ boost: κάθε ουρά ανεβαίνει ένα επίπεδο (η i πάει στην i+1) και η
+  υψηλότερη μένει στη θέση της. Ενημερώνεται και το tcb->priority κάθε
+  thread. Αγγίζει μόνο threads που είναι σε ουρά (READY): όσα τρέχουν ή
+  κοιμούνται (STOPPED) δεν αλλάζουν.
+
+  *** MUST BE CALLED WITH sched_spinlock HELD ***
+*/
+static void sched_boost(void)
+{
+	/* Από πάνω προς τα κάτω, ώστε κάθε thread να ανέβει ακριβώς μία φορά:
+	   όταν μετακινούμε την i στην i+1, η i+1 έχει ήδη αδειάσει προς την i+2. */
+	for (int i = PRIORITY_QUEUES - 2; i >= 0; i--) {
+		for (rlnode* n = SCHED[i].next; n != &SCHED[i]; n = n->next)
+			n->tcb->priority = i + 1;
+		rlist_append(&SCHED[i + 1], &SCHED[i]);
+	}
+}
+
+/* Μετρητής κλήσεων του yield για το boost (προστατεύεται από το sched_spinlock) */
+static unsigned int yields_since_boost = 0;
+
 /* This function is the entry point to the scheduler's context switching */
 
 void yield(enum SCHED_CAUSE cause)
@@ -474,6 +496,12 @@ void yield(enum SCHED_CAUSE cause)
 
 	/* Wake up threads whose sleep timeout has expired */
 	sched_wakeup_expired_timeouts();
+
+	/* MLFQ: περιοδικό boost για να μη λιμοκτονούν τα χαμηλά επίπεδα */
+	if (++yields_since_boost >= BOOST_PERIOD) {
+		yields_since_boost = 0;
+		sched_boost();
+	}
 
 	/* Get next */
 	TCB* next = sched_queue_select(current);
