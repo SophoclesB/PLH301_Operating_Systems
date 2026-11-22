@@ -2598,8 +2598,27 @@ BARE_TEST(dummy_user_test,
 
 
 /*
-  MLFQ tests (Ticket 7). Διαβάζουν την priority του τρέχοντος thread
-  μέσω cur_thread(), άρα ελέγχουν τον scheduler απευθείας.
+  MLFQ tests (Tickets 7–9). Διαβάζουν την priority του τρέχοντος thread
+  μέσω cur_thread(), άρα ελέγχουν τον scheduler απευθείας. Τα tests των
+  all_tests χρησιμοποιούν μόνο το API του tinyos.h, οπότε δεν βλέπουν
+  καθόλου την priority.
+
+    Test                                         Τι ελέγχει                     Ticket
+    -------------------------------------------  -----------------------------  ------
+    test_mlfq_new_thread_starts_at_top           νέο thread στο 9               6/7
+    test_mlfq_cpu_bound_drops_to_lowest          QUANTUM -1, ως το 0, όχι κάτω   7
+    test_mlfq_boost_lifts_starved_threads        boost ανεβάζει από το 0         8
+    test_mlfq_mutex_contention_lowers_priority   2x SCHED_MUTEX -> -1            9
+
+  Κάθε test ελέγχθηκε ότι ΑΠΟΤΥΓΧΑΝΕΙ αν αφαιρεθεί ο αντίστοιχος κανόνας.
+  Το SCHED_IO (+1) δεν έχει δικό του test (χρειάζεται είσοδο από τερματικό).
+  Φαίνεται στο test διαδραστικότητας του Φ6 σ.16.
+
+  Τα tests μετρούν χρόνο σε πολλαπλάσια του QUANTUM (bios_clock σε μs) και
+  όχι σε αριθμό επαναλήψεων, ώστε να μην εξαρτώνται από την ταχύτητα του
+  μηχανήματος.
+
+  Εκτέλεση:  ./validate_api -c 1,2,4 -t 1,2 user_tests
 */
 #include "kernel_sched.h"
 

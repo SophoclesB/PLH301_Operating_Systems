@@ -1,3 +1,31 @@
+/*
+  kernel_threads.c — Πολυνηματικές διεργασίες (Μέρος 1, Tickets 1–5)
+
+  System calls: CreateThread, ThreadSelf, ThreadJoin, ThreadDetach, ThreadExit.
+
+  Locking: όλα τα sys_* καλούνται από τα wrappers του kernel_sys.c (μακροεντολή
+  SYSCALL), που καλούν kernel_lock() πριν και kernel_unlock() μετά. Πρόκειται
+  για ένα big kernel lock: σημαφόρος kernel_sem με αρχική τιμή 1, χτισμένος
+  πάνω στο kernel_mutex (kernel_cc.c). Στα σχόλια λέμε απλώς «kernel_mutex».
+  Άρα μέσα στα sys_* τρέχει ένα μόνο thread του kernel κάθε φορά. Οι αναμονές
+  γίνονται με kernel_wait/kernel_sleep, που αφήνουν το lock όσο κοιμόμαστε.
+  Εξαίρεση: το start_thread τρέχει σε κώδικα χρήστη, χωρίς το lock.
+
+  Tid_t = (Tid_t) PTCB*. Ένα Tid_t από τον χρήστη μπορεί να είναι οτιδήποτε,
+  οπότε πριν από κάθε deref ελέγχουμε ότι είναι στο CURPROC->ptcb_list
+  (rlist_find, που συγκρίνει μόνο διευθύνσεις). Έτσι απορρίπτονται τα σκουπίδια,
+  τα threads άλλης διεργασίας και όσα PTCB έχουν ήδη ελευθερωθεί.
+
+  Ποιος ελευθερώνει τι:
+    TCB         ο scheduler (gain -> release_TCB), μετά το kernel_sleep(EXITED)
+    PTCB        release_PTCB, όταν exited==1 && refcount==0, από:
+                  - τον τελευταίο joiner (sys_ThreadJoin)
+                  - το ίδιο το thread αν είναι detached (sys_ThreadExit)
+                  - το cleanup_process (όσα έμειναν στο ptcb_list)
+    ptcb->args  ΠΟΤΕ από εδώ: ανήκει στον χρήστη ή στο PCB (pcb->args)
+
+  Πλήρης κύκλος ζωής του PTCB: βλ. kernel_proc.h, struct process_thread_control_block.
+*/
 
 #include "tinyos.h"
 #include "kernel_sched.h"

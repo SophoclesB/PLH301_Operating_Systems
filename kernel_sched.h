@@ -30,12 +30,46 @@
  *
  *****************************/
 
-/** @brief Number of MLFQ priority queues (queue PRIORITY_QUEUES-1 is the highest). */
+/*
+  MLFQ (Multilevel Feedback Queue) — συνοπτικά οι κανόνες και πού υλοποιούνται
+  (θεωρία: Δ4 σ.21–40, Φροντ. 6):
+
+    Κανόνας                                         Υλοποίηση (kernel_sched.c)
+    ---------------------------------------------   --------------------------------
+    1. Τρέχει πρώτα το thread της υψηλότερης ουράς  sched_queue_select (9 -> 0)
+    2. Ίδια προτεραιότητα: Round Robin              FIFO ουρά + quantum (ALARM)
+    3. Νέο thread ξεκινά στην κορυφή (9)            spawn_thread: priority = 9
+    4. Έφαγε όλο το quantum (CPU-bound): -1         sched_update_priority, SCHED_QUANTUM
+       Μπλόκαρε σε I/O (interactive):      +1         sched_update_priority, SCHED_IO
+    5. Περιοδικό boost όλων κατά +1 (starvation)    sched_boost, κάθε BOOST_PERIOD yields
+    +  Priority inversion: 2ο συνεχόμενο mutex: -1   sched_update_priority, SCHED_MUTEX
+
+  Ο MLFQ δεν ξέρει από πριν το CPU burst κάθε thread (όπως θα ήθελε ο SJF).
+  Το «μαθαίνει» από το πώς τελειώνει κάθε time-slice (enum SCHED_CAUSE).
+*/
+
+/** @brief Πλήθος ουρών του MLFQ.
+
+  Η ουρά @c PRIORITY_QUEUES-1 (=9) είναι η ΥΨΗΛΟΤΕΡΗ και η 0 η χαμηλότερη.
+  Άρα QUANTUM σημαίνει @c priority-- και IO/boost @c priority++.
+
+  Με τιμή 1 ο ίδιος κώδικας γίνεται καθαρό Round Robin: μία ουρά, και τα
+  όρια 0..0 ακυρώνουν το feedback και το boost. Έτσι έγινε η σύγκριση
+  RR vs MLFQ στο test διαδραστικότητας (Φ6 σ.16).
+*/
 #define PRIORITY_QUEUES 10
 
-/** @brief MLFQ boost: κάθε BOOST_PERIOD κλήσεις του yield (σε όλους τους
-    cores μαζί), όλες οι ουρές ανεβαίνουν ένα επίπεδο, ώστε τα threads
-    χαμηλής προτεραιότητας να μη λιμοκτονούν (starvation). */
+/** @brief Περίοδος του MLFQ boost, σε κλήσεις του @c yield.
+
+  Κάθε @c BOOST_PERIOD κλήσεις του @c yield (σε όλους τους cores μαζί),
+  κάθε ουρά ανεβαίνει ένα επίπεδο, ώστε τα threads χαμηλής προτεραιότητας να
+  μη λιμοκτονούν (starvation) όταν υπάρχουν συνέχεια threads ψηλότερα.
+
+  Επιλογή τιμής: με quantum 10 ms, σε 1 core γίνονται ~100 yields/s, άρα ένα
+  boost περίπου κάθε 1 s (σε 4 cores περίπου κάθε 0.25 s). Πολύ μικρή τιμή
+  ισοπεδώνει τις ουρές (ο MLFQ μοιάζει με RR). Πολύ μεγάλη αφήνει τα
+  CPU-bound threads να περιμένουν πολύ.
+*/
 #define BOOST_PERIOD 100
 
 /** @brief Thread state. 
@@ -89,6 +123,14 @@ typedef enum {
   This is used in the scheduler heuristics to determine how to
   adjust the dynamic priority of the current thread.
  */
+/*
+  Ποιες αιτίες αλλάζουν την priority στο MLFQ (sched_update_priority):
+    SCHED_QUANTUM  -> -1   (από το ALARM interrupt, yield_handler)
+    SCHED_IO       -> +1   (kernel_dev.c: αναμονή σε πληκτρολόγιο/serial)
+    SCHED_MUTEX    -> -1   μόνο αν και το προηγούμενο time-slice τελείωσε
+                           με SCHED_MUTEX (kernel_cc.c: Mutex_Lock)
+    όλες οι άλλες  ->  0   (π.χ. SCHED_USER: Join, WaitChild, CondVar)
+*/
 enum SCHED_CAUSE {
 	SCHED_QUANTUM, /**< @brief The quantum has expired */
 	SCHED_IO, /**< @brief The thread is waiting for I/O */
@@ -108,8 +150,13 @@ enum SCHED_CAUSE {
 typedef struct thread_control_block {
 
 	PCB* owner_pcb; /**< @brief This is null for a free TCB */
-	PTCB* ptcb; /**< @brief The PTCB of this thread (NULL for idle threads) */
-	int priority; /**< @brief MLFQ queue index; PRIORITY_QUEUES-1 is the highest */
+	PTCB* ptcb; /**< @brief Το PTCB του thread (NULL για τα idle threads).
+	                 Αμφίδρομη σύνδεση: ptcb->tcb == αυτό το TCB. Μηδενίζεται στο
+	                 sys_ThreadExit, γιατί το PTCB μπορεί να ελευθερωθεί πριν το TCB. */
+	int priority; /**< @brief MLFQ: σε ποια ουρά SCHED[priority] μπαίνει το thread.
+	                 PRIORITY_QUEUES-1 η υψηλότερη. Το γράφουν ΜΟΝΟ τα spawn_thread
+	                 (αρχική τιμή 9), sched_update_priority και sched_boost, όλα με
+	                 το sched_spinlock. Το διαβάζει το sched_queue_add. */
 
 	cpu_context_t context; /**< @brief The thread context */
 	Thread_type type; /**< @brief The type of thread */
@@ -124,8 +171,11 @@ typedef struct thread_control_block {
 	TimerDuration its; /**< @brief Initial time-slice for this thread */
 	TimerDuration rts; /**< @brief Remaining time-slice for this thread */
 
-	enum SCHED_CAUSE curr_cause; /**< @brief The endcause for the current time-slice */
-	enum SCHED_CAUSE last_cause; /**< @brief The endcause for the last time-slice */
+	enum SCHED_CAUSE curr_cause; /**< @brief The endcause for the current time-slice.
+	                                  Το ενημερώνει το yield, πριν το sched_update_priority. */
+	enum SCHED_CAUSE last_cause; /**< @brief The endcause for the last time-slice.
+	                                  Χρησιμοποιείται για το priority inversion:
+	                                  curr_cause == last_cause == SCHED_MUTEX. */
 
 #ifndef NVALGRIND
 	unsigned valgrind_stack_id; /**< @brief Valgrind helper for stacks. 

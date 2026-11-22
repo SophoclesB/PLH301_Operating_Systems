@@ -46,6 +46,9 @@ void Mutex_Lock(Mutex* lock)
       	spin--; 
       else { 
       	spin=MUTEX_SPINS; 
+      	/* MLFQ: αφού έκανε spin χωρίς να πάρει το lock, το thread αφήνει τη CPU
+      	   με SCHED_MUTEX. Δύο τέτοια yield στη σειρά ρίχνουν την priority
+      	   κατά 1 (priority inversion, sched_update_priority). */
       	if(cpu_interrupts_enabled())
       		yield(SCHED_MUTEX); 
       }

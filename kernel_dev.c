@@ -125,6 +125,8 @@ int serial_read(void* dev, char *buf, unsigned int size)
       count++;
     }
     else if(count==0) {
+      /* MLFQ: αναμονή για πλήκτρο με SCHED_IO, άρα priority +1. Έτσι το shell
+         ανεβαίνει στις ψηλές ουρές και απαντά αμέσως (test Φ6 σ.16). */
       kernel_wait(&dcb->rx_ready, SCHED_IO);
     }
     else
@@ -164,6 +166,7 @@ int serial_write(void* dev, const char* buf, unsigned int size)
     } 
     else if(count==0)
     {
+      /* MLFQ: ο buffer εξόδου είναι γεμάτος, περιμένουμε το I/O (priority +1) */
       yield(SCHED_IO);
     }
     else

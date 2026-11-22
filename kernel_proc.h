@@ -59,8 +59,15 @@ typedef struct process_control_block {
 
   FCB* FIDT[MAX_FILEID];  /**< @brief The fileid table of the process */
 
-  rlnode ptcb_list;       /**< @brief List of the PTCBs of this process's threads */
-  int thread_count;       /**< @brief Number of live (non-exited) threads */
+  rlnode ptcb_list;       /**< @brief Λίστα με τα PTCB των threads της διεργασίας.
+                               Αναλλοίωτο: ένα PTCB είναι εδώ <=> δεν έχει ελευθερωθεί.
+                               Περιέχει και τερματισμένα threads που περιμένουν Join.
+                               Τα Join/Detach την ψάχνουν (rlist_find) για να
+                               ελέγξουν αν ένα Tid_t είναι έγκυρο. */
+  int thread_count;       /**< @brief Πόσα threads της διεργασίας ζουν ακόμα (δεν έχουν
+                               κάνει ThreadExit). ++ στο spawn_ptcb, -- στο sys_ThreadExit.
+                               Όταν γίνει 0, το τελευταίο thread καλεί cleanup_process.
+                               ΔΕΝ είναι το μήκος του ptcb_list (εκεί μένουν και exited). */
 
 } PCB;
 
@@ -69,6 +76,34 @@ typedef struct process_control_block {
 
   Per-thread information at the process level. The typedef @c PTCB
   is declared in util.h.
+
+  Γιατί χρειάζεται (Φροντ. 5): το TCB ανήκει στον scheduler και
+  ελευθερώνεται αμέσως μόλις το thread τερματίσει (gain -> release_TCB).
+  Όμως κάποιο άλλο thread μπορεί να κάνει αργότερα @c ThreadJoin και να
+  ζητήσει το exitval. Το PTCB κρατά αυτή την πληροφορία σε επίπεδο
+  διεργασίας και ζει όσο χρειάζεται, ανεξάρτητα από το TCB.
+
+  Το @c Tid_t ενός thread είναι η διεύθυνση του PTCB του.
+
+  Σχέσεις:
+  @verbatim
+      PCB --ptcb_list--> PTCB <--> PTCB <--> ...
+                          | ^
+                      tcb | | ptcb
+                          v |
+                          TCB  (scheduler: SCHED[priority], TIMEOUT_LIST)
+  @endverbatim
+
+  Κύκλος ζωής ενός PTCB:
+   1. spawn_ptcb: malloc, μπαίνει στο ptcb_list, thread_count++.
+   2. sys_ThreadExit: exited = 1, broadcast στο exit_cv, thread_count--.
+   3. release_PTCB (free), από ΕΝΑ από τα τρία σημεία, όταν exited==1 και
+      refcount==0:
+        α. ο τελευταίος joiner, στο sys_ThreadJoin,
+        β. το ίδιο το thread στο sys_ThreadExit, αν είναι detached,
+        γ. το cleanup_process, για όσα έμειναν (π.χ. δεν έγιναν ποτέ Join).
+
+  Όλα τα πεδία προστατεύονται από το kernel_mutex.
  */
 struct process_thread_control_block {
   TCB* tcb;               /**< @brief The thread's TCB */
@@ -83,11 +118,16 @@ struct process_thread_control_block {
 
   int exitval;            /**< @brief The thread's exit value */
 
-  int exited;             /**< @brief 1 if the thread has exited */
-  int detached;           /**< @brief 1 if the thread is detached */
-  CondVar exit_cv;        /**< @brief Broadcast when the thread exits or is detached */
+  int exited;             /**< @brief 1 if the thread has exited (δεν ξαναγίνεται 0) */
+  int detached;           /**< @brief 1 if the thread is detached (δεν ξαναγίνεται 0).
+                               Μπορεί να ισχύουν ταυτόχρονα exited==1 και detached==1. */
+  CondVar exit_cv;        /**< @brief Broadcast when the thread exits or is detached.
+                               Εδώ κοιμούνται οι joiners (kernel_wait). Βρίσκεται μέσα
+                               στο PTCB, γι' αυτό το PTCB δεν ελευθερώνεται όσο κάποιος
+                               είναι μέσα στο kernel_wait (βλ. refcount). */
 
-  int refcount;           /**< @brief Number of threads waiting in ThreadJoin */
+  int refcount;           /**< @brief Number of threads waiting in ThreadJoin.
+                               Όσο είναι > 0, το PTCB ΔΕΝ ελευθερώνεται. */
 
   rlnode ptcb_list_node;  /**< @brief Intrusive node for @c PCB.ptcb_list */
 };

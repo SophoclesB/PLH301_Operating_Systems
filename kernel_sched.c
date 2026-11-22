@@ -229,6 +229,27 @@ void release_TCB(TCB* tcb)
   threads with a timeout.
 
   Both of these structures are protected by @c sched_spinlock.
+
+  Υλοποίηση των ουρών: κάθε SCHED[i] είναι ο κόμβος-φρουρός (sentinel) μιας
+  κυκλικής διπλά συνδεδεμένης λίστας rlnode (util.h). Άδεια ουρά σημαίνει
+  SCHED[i].next == &SCHED[i], και το SCHED[i].tcb είναι NULL. Οι κόμβοι είναι
+  τα tcb->sched_node, μέσα στα ίδια τα TCB (intrusive list, χωρίς malloc).
+  Το ίδιο sched_node χρησιμοποιείται και στο TIMEOUT_LIST: ένα thread είναι
+  είτε σε ουρά (READY) είτε κοιμάται με timeout (STOPPED), ποτέ και τα δύο.
+
+  Αναλλοίωτο του MLFQ (επέκταση του αναλλοίωτου στο kernel_sched.h):
+      tcb στο SCHED[i]  <=>  state == READY && phase == CTX_CLEAN && priority == i
+
+  Ταξίδι ενός thread στον scheduler (ένα time-slice):
+      τρέχει -> yield(cause)
+                  1. curr_cause = cause
+                  2. sched_update_priority  (νέα priority από το cause)
+                  3. sched_wakeup_expired_timeouts
+                  4. ίσως sched_boost
+                  5. sched_queue_select     (ποιος τρέχει μετά)
+                  6. cpu_swap_context
+             -> gain() του επόμενου: sched_queue_add(prev), στην ουρά
+                SCHED[prev->priority] με την priority του βήματος 2
 */
 
 rlnode SCHED[PRIORITY_QUEUES]; /* Οι ουρές του MLFQ, μία ανά προτεραιότητα */
@@ -268,6 +289,18 @@ static void sched_register_timeout(TCB* tcb, TimerDuration timeout)
 
 /*
   Προσθέτει το TCB στο τέλος της ουράς SCHED[tcb->priority].
+
+  Είναι το ΜΟΝΑΔΙΚΟ σημείο όπου ένα thread μπαίνει σε ουρά. Το καλούν:
+    - το sched_make_ready: thread που ξυπνά (wakeup, timeout) ή νέο thread,
+    - το gain: το προηγούμενο thread του core, αν είναι ακόμα READY.
+  Επειδή η ουρά διαλέγεται εδώ από το tcb->priority, αρκεί η priority να έχει
+  αλλάξει πριν από την κλήση (sched_update_priority στο yield). Η priority
+  δεν χρειάζεται να είναι γνωστή αλλού.
+
+  Ένα thread που ξυπνά από sleep κρατά την priority που είχε όταν κοιμήθηκε
+  (π.χ. +1 αν κοιμήθηκε με SCHED_IO).
+
+  Κόστος: O(1).
 
   *** MUST BE CALLED WITH sched_spinlock HELD ***
 */
@@ -330,6 +363,19 @@ static void sched_wakeup_expired_timeouts()
   Βγάζει και επιστρέφει την κεφαλή της υψηλότερης μη κενής ουράς
   (από την PRIORITY_QUEUES-1 προς την 0). Αν όλες είναι κενές,
   επιστρέφει το current (αν είναι READY) ή το idle thread.
+
+  Κανόνες 1–2 του MLFQ: πρώτα η υψηλότερη ουρά. Μέσα στην ίδια ουρά, η κεφαλή
+  (FIFO), άρα Round Robin μεταξύ threads ίδιας προτεραιότητας.
+
+  Το current δεν είναι σε ουρά εκείνη τη στιγμή (μπαίνει μετά, στο gain). Αν
+  όμως υπάρχει έστω και ένα thread σε οποιαδήποτε ουρά, το current αφήνει τη
+  CPU, ακόμα κι αν έχει μεγαλύτερη priority. Το current ξανατρέχει χωρίς
+  context switch μόνο όταν όλες οι ουρές είναι άδειες.
+
+  Το break είναι απαραίτητο: σταματάμε στην πρώτη (υψηλότερη) μη κενή ουρά
+  και βγάζουμε ΕΝΑ thread. Χωρίς αυτό θα καταλήγαμε στη χαμηλότερη ουρά.
+
+  Κόστος: O(PRIORITY_QUEUES), δηλαδή σταθερό.
 
   *** MUST BE CALLED WITH sched_spinlock HELD ***
 */
@@ -425,6 +471,16 @@ void sleep_releasing(Thread_state state, Mutex* mx, enum SCHED_CAUSE cause,
   Η priority μένει πάντα μέσα στο 0..PRIORITY_QUEUES-1 και το idle
   thread δεν αλλάζει ποτέ.
 
+  Γιατί δουλεύει (Δ4 σ.21–40, Φ6 σ.7, 9): τα interactive threads (shell,
+  editor) τρέχουν λίγο και μπλοκάρουν σε I/O, άρα ανεβαίνουν και απαντούν
+  αμέσως. Τα CPU-bound threads τρώνε όλο το quantum, άρα πέφτουν και τρέχουν
+  όταν δεν υπάρχει κάτι πιο επείγον. Ο scheduler δεν χρειάζεται να ξέρει το
+  CPU burst από πριν: το μαθαίνει από τη συμπεριφορά.
+
+  Καλείται από το yield ΠΡΙΝ το sched_queue_select. Έτσι, όταν το gain του
+  επόμενου thread κάνει sched_queue_add(prev), το prev μπαίνει ήδη στη σωστή
+  (νέα) ουρά.
+
   *** MUST BE CALLED WITH sched_spinlock HELD ***
 */
 static void sched_update_priority(TCB* tcb, enum SCHED_CAUSE cause)
@@ -446,7 +502,20 @@ static void sched_update_priority(TCB* tcb, enum SCHED_CAUSE cause)
 		/* Priority inversion: δεύτερο συνεχόμενο yield σε mutex σημαίνει ότι
 		   το lock το κρατά κάποιος που δεν προλαβαίνει να τρέξει. Πέφτουμε
 		   ένα επίπεδο ώστε να τρέξει ο κάτοχος και να το αφήσει. Το
-		   last_cause το έχει ήδη ενημερώσει το yield πριν μας καλέσει. */
+		   last_cause το έχει ήδη ενημερώσει το yield πριν μας καλέσει.
+
+		   Το πρόβλημα (Δ4 σ.87–88): το Mutex_Lock κάνει yield(SCHED_MUTEX)
+		   αφού κάνει spin χωρίς να πάρει το lock, άρα δεν εξαντλεί το
+		   quantum και δεν πέφτει μέσω SCHED_QUANTUM. Ένα H ψηλά μπορεί να
+		   κρατά τη CPU όσο ο κάτοχος L, πιο χαμηλά, δεν προλαβαίνει να τρέξει.
+
+		   Γιατί δύο στη σειρά και όχι ένα: ένα μεμονωμένο yield μπορεί να
+		   είναι απλώς λίγο contention. Δύο συνεχόμενα δείχνουν ότι το
+		   thread κόλλησε.
+
+		   Η εναλλακτική είναι το priority inheritance (Δ4 σ.89, Φ6 σ.13), όπου ανεβαίνει
+		   ο κάτοχος. Εδώ δεν γίνεται εύκολα: το Mutex είναι ένα char και δεν
+		   ξέρει ποιος το κρατά. */
 		if (tcb->last_cause == SCHED_MUTEX && tcb->priority > 0)
 			tcb->priority--;
 		break;
@@ -461,6 +530,18 @@ static void sched_update_priority(TCB* tcb, enum SCHED_CAUSE cause)
   thread. Αγγίζει μόνο threads που είναι σε ουρά (READY): όσα τρέχουν ή
   κοιμούνται (STOPPED) δεν αλλάζουν.
 
+  Κανόνας 5 του MLFQ (Δ4 σ.21–40, Φ6 σ.14): χωρίς boost, ένα CPU-bound thread
+  στο 0 μπορεί να μην τρέξει ποτέ αν υπάρχουν συνέχεια threads ψηλότερα
+  (starvation). Ένα thread που άλλαξε συμπεριφορά (π.χ. έγινε interactive)
+  θα έμενε επίσης για πάντα χαμηλά.
+
+  Επιλογή σχεδίασης: κάθε ουρά ανεβαίνει ΕΝΑ επίπεδο (όχι όλοι στην κορυφή).
+  Έτσι κρατιέται η σχετική σειρά των threads. Η μεταφορά όλων στο 9 θα έκανε
+  τον MLFQ προσωρινά καθαρό RR.
+
+  Κόστος: η μεταφορά κάθε ουράς είναι O(1) (rlist_append ενώνει λίστες), αλλά
+  το priority γράφεται σε κάθε thread χωριστά, άρα συνολικά O(READY threads).
+
   *** MUST BE CALLED WITH sched_spinlock HELD ***
 */
 static void sched_boost(void)
@@ -474,7 +555,10 @@ static void sched_boost(void)
 	}
 }
 
-/* Μετρητής κλήσεων του yield για το boost (προστατεύεται από το sched_spinlock) */
+/* Μετρητής κλήσεων του yield για το boost (προστατεύεται από το sched_spinlock).
+   Ένας για όλο το σύστημα (όχι ανά core), γιατί οι ουρές είναι κοινές για
+   όλους τους cores. Άρα με περισσότερους cores το boost γίνεται πιο συχνά σε
+   πραγματικό χρόνο. */
 static unsigned int yields_since_boost = 0;
 
 /* This function is the entry point to the scheduler's context switching */
@@ -500,13 +584,19 @@ void yield(enum SCHED_CAUSE cause)
 	current->last_cause = current->curr_cause;
 	current->curr_cause = cause;
 
-	/* MLFQ: νέα priority πριν το select και πριν το gain τον ξαναβάλει σε ουρά */
+	/* MLFQ: νέα priority πριν το select και πριν το gain τον ξαναβάλει σε ουρά.
+	   Η σειρά μετράει: αν άλλαζε μετά το sched_queue_add του gain, το thread
+	   θα είχε μπει ήδη στην παλιά ουρά και η αλλαγή θα φαινόταν μόνο στο
+	   ΕΠΟΜΕΝΟ time-slice. Εδώ κρατάμε και το sched_spinlock, που προστατεύει
+	   το tcb->priority. */
 	sched_update_priority(current, cause);
 
 	/* Wake up threads whose sleep timeout has expired */
 	sched_wakeup_expired_timeouts();
 
-	/* MLFQ: περιοδικό boost για να μη λιμοκτονούν τα χαμηλά επίπεδα */
+	/* MLFQ: περιοδικό boost για να μη λιμοκτονούν τα χαμηλά επίπεδα.
+	   Πριν το select, ώστε το select να δει ήδη τις νέες ουρές. Το current
+	   δεν είναι σε ουρά αυτή τη στιγμή, άρα το boost δεν το αγγίζει. */
 	if (++yields_since_boost >= BOOST_PERIOD) {
 		yields_since_boost = 0;
 		sched_boost();
@@ -556,7 +646,12 @@ void gain(int preempt)
 	current->phase = CTX_DIRTY;
 	current->rts = current->its;
 
-	/* Take care of the previous thread */
+	/* Take care of the previous thread.
+	   MLFQ: εδώ το προηγούμενο thread ξαναμπαίνει σε ουρά (sched_queue_add),
+	   στην ουρά SCHED[prev->priority], με την priority που του έδωσε το
+	   sched_update_priority στο yield του. Γίνεται εδώ και όχι στο yield,
+	   γιατί μόνο τώρα το context του prev έχει σωθεί (CTX_CLEAN) και
+	   επιτρέπεται να το διαλέξει άλλος core. */
 	TCB* prev = CURCORE.previous_thread;
 	if (current != prev) {
 		prev->phase = CTX_CLEAN;
