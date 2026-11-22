@@ -416,6 +416,36 @@ void sleep_releasing(Thread_state state, Mutex* mx, enum SCHED_CAUSE cause,
 		preempt_on;
 }
 
+/*
+  MLFQ feedback: προσαρμόζει την priority του tcb ανάλογα με το
+  γιατί τελείωσε το time-slice του (cause).
+    - SCHED_QUANTUM: έφαγε όλο το quantum, άρα CPU-bound → priority--
+    - SCHED_IO:      περιμένει I/O, άρα interactive        → priority++
+  Η priority μένει πάντα μέσα στο 0..PRIORITY_QUEUES-1 και το idle
+  thread δεν αλλάζει ποτέ.
+
+  *** MUST BE CALLED WITH sched_spinlock HELD ***
+*/
+static void sched_update_priority(TCB* tcb, enum SCHED_CAUSE cause)
+{
+	/* Το idle έχει πάντα priority 0 και δεν μπαίνει ποτέ σε ουρά */
+	if (tcb->type == IDLE_THREAD)
+		return;
+
+	switch (cause) {
+	case SCHED_QUANTUM: /* CPU-bound: πέφτει ένα επίπεδο */
+		if (tcb->priority > 0)
+			tcb->priority--;
+		break;
+	case SCHED_IO: /* interactive: ανεβαίνει ένα επίπεδο */
+		if (tcb->priority < PRIORITY_QUEUES - 1)
+			tcb->priority++;
+		break;
+	default: /* οι υπόλοιπες αιτίες δεν αλλάζουν την priority */
+		break;
+	}
+}
+
 /* This function is the entry point to the scheduler's context switching */
 
 void yield(enum SCHED_CAUSE cause)
@@ -438,6 +468,9 @@ void yield(enum SCHED_CAUSE cause)
 	current->rts = remaining;
 	current->last_cause = current->curr_cause;
 	current->curr_cause = cause;
+
+	/* MLFQ: νέα priority πριν το select και πριν το gain τον ξαναβάλει σε ουρά */
+	sched_update_priority(current, cause);
 
 	/* Wake up threads whose sleep timeout has expired */
 	sched_wakeup_expired_timeouts();

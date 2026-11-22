@@ -2597,11 +2597,83 @@ BARE_TEST(dummy_user_test,
 }
 
 
-TEST_SUITE(user_tests, 
+/*
+  MLFQ tests (Ticket 7). Διαβάζουν την priority του τρέχοντος thread
+  μέσω cur_thread(), άρα ελέγχουν τον scheduler απευθείας.
+*/
+#include "kernel_sched.h"
+
+static int mlfq_start_priority_task(int argl, void* args)
+{
+	*(int*)args = cur_thread()->priority;
+	return 0;
+}
+
+BOOT_TEST(test_mlfq_new_thread_starts_at_top,
+	"MLFQ: a new thread starts at the highest priority (PRIORITY_QUEUES-1)."
+	)
+{
+	int prio = -1;
+	Tid_t t = CreateThread(mlfq_start_priority_task, 0, &prio);
+	ASSERT(t != NOTHREAD);
+	ASSERT(ThreadJoin(t, NULL) == 0);
+	ASSERT_MSG(prio == PRIORITY_QUEUES - 1,
+		"αρχική priority %d, αναμενόταν %d\n", prio, PRIORITY_QUEUES - 1);
+	return 0;
+}
+
+/* Αποτελέσματα του CPU-bound thread */
+struct mlfq_spin_result {
+	int final;     /* priority στο τέλος */
+	int min, max;  /* μικρότερη και μεγαλύτερη που είδαμε */
+	int increased; /* 1 αν ανέβηκε ποτέ (δεν πρέπει, δεν κάνει I/O) */
+};
+
+static int mlfq_spin_task(int argl, void* args)
+{
+	struct mlfq_spin_result* r = args;
+	int last = cur_thread()->priority;
+	r->min = r->max = last;
+	r->increased = 0;
+
+	/* 300 ms busy loop = ~30 quanta, αρκετά για να πέσει από το 9 στο 0 */
+	TimerDuration start = bios_clock();
+	while (bios_clock() - start < 30 * QUANTUM) {
+		int p = cur_thread()->priority;
+		if (p > last) r->increased = 1;
+		if (p < r->min) r->min = p;
+		if (p > r->max) r->max = p;
+		last = p;
+	}
+	r->final = cur_thread()->priority;
+	return 0;
+}
+
+BOOT_TEST(test_mlfq_cpu_bound_drops_to_lowest,
+	"MLFQ: a CPU-bound thread drops one level per quantum, down to 0 and never below."
+	)
+{
+	struct mlfq_spin_result r;
+	Tid_t t = CreateThread(mlfq_spin_task, 0, &r);
+	ASSERT(t != NOTHREAD);
+	ASSERT(ThreadJoin(t, NULL) == 0);
+
+	ASSERT_MSG(r.final == 0, "τελική priority %d, αναμενόταν 0\n", r.final);
+	ASSERT_MSG(r.min >= 0, "η priority έπεσε στο %d (κάτω από 0)\n", r.min);
+	ASSERT_MSG(r.max <= PRIORITY_QUEUES - 1,
+		"η priority έφτασε στο %d (πάνω από %d)\n", r.max, PRIORITY_QUEUES - 1);
+	ASSERT_MSG(!r.increased, "η priority ανέβηκε χωρίς I/O\n");
+	return 0;
+}
+
+
+TEST_SUITE(user_tests,
 	"These are tests defined by the user."
 	)
 {
 	&dummy_user_test,
+	&test_mlfq_new_thread_starts_at_top,
+	&test_mlfq_cpu_bound_drops_to_lowest,
 	NULL
 };
 
