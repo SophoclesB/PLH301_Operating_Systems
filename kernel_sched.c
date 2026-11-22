@@ -421,6 +421,7 @@ void sleep_releasing(Thread_state state, Mutex* mx, enum SCHED_CAUSE cause,
   γιατί τελείωσε το time-slice του (cause).
     - SCHED_QUANTUM: έφαγε όλο το quantum, άρα CPU-bound → priority--
     - SCHED_IO:      περιμένει I/O, άρα interactive        → priority++
+    - SCHED_MUTEX δύο φορές στη σειρά (priority inversion)  → priority--
   Η priority μένει πάντα μέσα στο 0..PRIORITY_QUEUES-1 και το idle
   thread δεν αλλάζει ποτέ.
 
@@ -440,6 +441,14 @@ static void sched_update_priority(TCB* tcb, enum SCHED_CAUSE cause)
 	case SCHED_IO: /* interactive: ανεβαίνει ένα επίπεδο */
 		if (tcb->priority < PRIORITY_QUEUES - 1)
 			tcb->priority++;
+		break;
+	case SCHED_MUTEX:
+		/* Priority inversion: δεύτερο συνεχόμενο yield σε mutex σημαίνει ότι
+		   το lock το κρατά κάποιος που δεν προλαβαίνει να τρέξει. Πέφτουμε
+		   ένα επίπεδο ώστε να τρέξει ο κάτοχος και να το αφήσει. Το
+		   last_cause το έχει ήδη ενημερώσει το yield πριν μας καλέσει. */
+		if (tcb->last_cause == SCHED_MUTEX && tcb->priority > 0)
+			tcb->priority--;
 		break;
 	default: /* οι υπόλοιπες αιτίες δεν αλλάζουν την priority */
 		break;
