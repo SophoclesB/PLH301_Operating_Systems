@@ -220,8 +220,10 @@ void release_TCB(TCB* tcb)
  */
 
 /*
-  The scheduler queue is implemented as a doubly linked list. The
-  head and tail of this list are stored in  SCHED.
+  MLFQ: ο scheduler έχει PRIORITY_QUEUES ουρές, μία ανά επίπεδο
+  προτεραιότητας. Κάθε ουρά είναι μια διπλά συνδεδεμένη λίστα και
+  η SCHED[i] κρατά την κεφαλή της. Η ουρά PRIORITY_QUEUES-1 είναι η
+  υψηλότερη και η 0 η χαμηλότερη.
 
   Also, the scheduler contains a linked list of all the sleeping
   threads with a timeout.
@@ -229,7 +231,7 @@ void release_TCB(TCB* tcb)
   Both of these structures are protected by @c sched_spinlock.
 */
 
-rlnode SCHED; /* The scheduler queue */
+rlnode SCHED[PRIORITY_QUEUES]; /* Οι ουρές του MLFQ, μία ανά προτεραιότητα */
 rlnode TIMEOUT_LIST; /* The list of threads with a timeout */
 Mutex sched_spinlock = MUTEX_INIT; /* spinlock for scheduler queue */
 
@@ -265,14 +267,16 @@ static void sched_register_timeout(TCB* tcb, TimerDuration timeout)
 }
 
 /*
-  Add TCB to the end of the scheduler list.
+  Προσθέτει το TCB στο τέλος της ουράς SCHED[tcb->priority].
 
   *** MUST BE CALLED WITH sched_spinlock HELD ***
 */
 static void sched_queue_add(TCB* tcb)
 {
-	/* Insert at the end of the scheduling list */
-	rlist_push_back(&SCHED, &tcb->sched_node);
+	assert(tcb->priority >= 0 && tcb->priority < PRIORITY_QUEUES);
+
+	/* Στο τέλος της ουράς της προτεραιότητάς του (FIFO μέσα στο επίπεδο) */
+	rlist_push_back(&SCHED[tcb->priority], &tcb->sched_node);
 
 	/* Restart possibly halted cores */
 	cpu_core_restart_one();
@@ -323,17 +327,24 @@ static void sched_wakeup_expired_timeouts()
 }
 
 /*
-  Remove the head of the scheduler list, if any, and
-  return it. Return NULL if the list is empty.
+  Βγάζει και επιστρέφει την κεφαλή της υψηλότερης μη κενής ουράς
+  (από την PRIORITY_QUEUES-1 προς την 0). Αν όλες είναι κενές,
+  επιστρέφει το current (αν είναι READY) ή το idle thread.
 
   *** MUST BE CALLED WITH sched_spinlock HELD ***
 */
 static TCB* sched_queue_select(TCB* current)
 {
-	/* Get the head of the SCHED list */
-	rlnode* sel = rlist_pop_front(&SCHED);
+	TCB* next_thread = NULL;
 
-	TCB* next_thread = sel->tcb; /* When the list is empty, this is NULL */
+	/* Βρες την υψηλότερη μη κενή ουρά SCHED[i] και βγάλε την κεφαλή της στο next_thread */
+	for (int i = PRIORITY_QUEUES - 1; i >= 0; i--) {
+		if ( !is_rlist_empty(&SCHED[i]) ) {
+			next_thread = rlist_pop_front(&SCHED[i])->tcb;
+			break;
+		}
+	}
+
 
 	if (next_thread == NULL)
 		next_thread = (current->state == READY) ? current : &CURCORE.idle_thread;
@@ -525,7 +536,8 @@ static void idle_thread()
  */
 void initialize_scheduler()
 {
-	rlnode_init(&SCHED, NULL);
+	for (int i = 0; i < PRIORITY_QUEUES; i++)
+		rlnode_init(&SCHED[i], NULL);
 	rlnode_init(&TIMEOUT_LIST, NULL);
 }
 
