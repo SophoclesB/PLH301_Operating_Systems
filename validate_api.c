@@ -2714,6 +2714,68 @@ BOOT_TEST(test_mlfq_boost_lifts_starved_threads,
 }
 
 
+/*
+  Priority inversion test (Ticket 9): το L κρατά ένα mutex για ~10 quanta,
+  ενώ το H (ξεκινά στο 9) προσπαθεί να το πάρει. Το H κάνει πολλά
+  συνεχόμενα yield(SCHED_MUTEX), άρα η priority του πρέπει να πέσει.
+*/
+struct mlfq_inversion_shared {
+	Mutex m;
+	volatile int locked;  /* 1 όταν το L έχει πάρει το mutex */
+	int h_start, h_after; /* priority του H πριν και αφού πάρει το mutex */
+};
+
+static int mlfq_inversion_low_task(int argl, void* args)
+{
+	struct mlfq_inversion_shared* s = args;
+	Mutex_Lock(&s->m);
+	s->locked = 1;
+
+	/* Κρατάμε το mutex για ~10 quanta */
+	TimerDuration start = bios_clock();
+	while (bios_clock() - start < 10 * QUANTUM)
+		;
+
+	Mutex_Unlock(&s->m);
+	return 0;
+}
+
+static int mlfq_inversion_high_task(int argl, void* args)
+{
+	struct mlfq_inversion_shared* s = args;
+	s->h_start = cur_thread()->priority;
+	Mutex_Lock(&s->m);
+	s->h_after = cur_thread()->priority;
+	Mutex_Unlock(&s->m);
+	return 0;
+}
+
+BOOT_TEST(test_mlfq_mutex_contention_lowers_priority,
+	"MLFQ: repeated yields on a contended mutex lower the waiter's priority."
+	)
+{
+	struct mlfq_inversion_shared s = { .m = MUTEX_INIT, .locked = 0 };
+
+	Tid_t low = CreateThread(mlfq_inversion_low_task, 0, &s);
+	ASSERT(low != NOTHREAD);
+	while (!s.locked)
+		;
+
+	Tid_t high = CreateThread(mlfq_inversion_high_task, 0, &s);
+	ASSERT(high != NOTHREAD);
+
+	ASSERT(ThreadJoin(high, NULL) == 0);
+	ASSERT(ThreadJoin(low, NULL) == 0);
+
+	ASSERT_MSG(s.h_start == PRIORITY_QUEUES - 1,
+		"το H ξεκίνησε στο %d, αναμενόταν %d\n", s.h_start, PRIORITY_QUEUES - 1);
+	ASSERT_MSG(s.h_after < s.h_start,
+		"το H έμεινε στο %d μετά από αναμονή στο mutex (αναμενόταν < %d)\n",
+		s.h_after, s.h_start);
+	return 0;
+}
+
+
 TEST_SUITE(user_tests,
 	"These are tests defined by the user."
 	)
@@ -2722,6 +2784,7 @@ TEST_SUITE(user_tests,
 	&test_mlfq_new_thread_starts_at_top,
 	&test_mlfq_cpu_bound_drops_to_lowest,
 	&test_mlfq_boost_lifts_starved_threads,
+	&test_mlfq_mutex_contention_lowers_priority,
 	NULL
 };
 
