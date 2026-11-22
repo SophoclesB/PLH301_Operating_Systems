@@ -315,7 +315,7 @@ typedef struct resource_list_node {
     CCB* ccb;
     DCB* dcb;
     FCB* fcb;
-    PTCB* ptcb;
+    PTCB* ptcb;   /* Μέρος 1: για το PCB.ptcb_list (node->ptcb) */
     void* obj;
     rlnode_ptr node;
     intptr_t num;

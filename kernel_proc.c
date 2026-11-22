@@ -5,13 +5,28 @@
 #include "kernel_streams.h"
 
 
-/* 
+/*
  The process table and related system calls:
  - Exec
  - Exit
  - WaitPid
  - GetPid
  - GetPPid
+
+ Αλλαγές για τις πολυνηματικές διεργασίες (Μέρος 1):
+ - spawn_ptcb / release_PTCB: δημιουργία και αποδέσμευση PTCB. Κάθε thread,
+   και το main thread, έχει PTCB (το παλιό pcb->main_thread καταργήθηκε).
+ - sys_Exit: γράφει το exitval της διεργασίας και μετά τερματίζει ΜΟΝΟ το
+   τρέχον thread (sys_ThreadExit). Η διεργασία τελειώνει όταν βγει και το
+   τελευταίο της thread.
+ - cleanup_process: ο καθαρισμός που παλιά έκανε το sys_Exit. Τρέχει από το
+   τελευταίο thread που κάνει ThreadExit (thread_count == 0).
+
+ Ροή τερματισμού:
+   Exit(v) -> sys_Exit: pcb->exitval = v -> sys_ThreadExit
+   ThreadExit(v) -> sys_ThreadExit: ptcb->exitval = v, thread_count--
+       αν thread_count == 0 -> cleanup_process (ZOMBIE, ξύπνημα του parent)
+       kernel_sleep(EXITED) -> ο scheduler ελευθερώνει το TCB
 
  */
 
@@ -120,6 +135,11 @@ void release_PCB(PCB* pcb)
 /*
 	This function is provided as an argument to spawn,
 	to execute the main thread of a process.
+
+	Διαφορά από το start_thread (kernel_threads.c): όταν επιστρέψει η main
+	συνάρτηση, καλείται Exit (όχι ThreadExit). Έτσι η τιμή επιστροφής της main
+	γίνεται exitval της ΔΙΕΡΓΑΣΙΑΣ, όπως στο C. Τα υπόλοιπα threads συνεχίζουν
+	μέχρι να τερματίσουν κι αυτά (βλ. test_main_exit_cleanup).
 */
 void start_main_thread()
 {
